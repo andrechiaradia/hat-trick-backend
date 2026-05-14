@@ -1,0 +1,7 @@
+{
+  "name": "hat-trick-pronunciation-backend",
+  "version": "1.0.0",
+  "description": "Backend de avaliação de pronúncia para o Hat Trick Challenge",
+  "type": "module",
+  "private": true
+}

@@ -1,31 +1,35 @@
-/**
- * ═══════════════════════════════════════════════════════════════
- * HAT TRICK CHALLENGE — BACKEND DE PRONÚNCIA
- * ═══════════════════════════════════════════════════════════════
- *
- * Este arquivo recebe áudio do aluno, envia pra Azure Pronunciation
- * Assessment, e devolve o score de pronúncia.
- *
- * Não precisa editar nada aqui! A chave e a região da Azure são
- * configuradas como "Environment Variables" na Vercel (veja o
- * passo a passo no arquivo COMO_CONFIGURAR_GOL2.md).
- */
+// api/pronunciation.js
+//
+// Backend Vercel — Hat Trick Challenge · Gol 02
+// Recebe áudio do navegador em base64, envia pra Azure Speech Pronunciation Assessment,
+// e devolve nota de 0-100 + score palavra por palavra.
+//
+// Variáveis de ambiente necessárias na Vercel:
+//   AZURE_KEY     → sua chave do Speech Service
+//   AZURE_REGION  → ex: eastus
+//
+// IMPORTANTE: Azure Pronunciation Assessment aceita áudio em formatos limitados.
+// Recomendado: WAV (PCM 16-bit, 16 kHz, mono). Como o navegador grava em WebM/Opus,
+// usamos o parâmetro "format=detailed" da API REST de short audio que aceita
+// múltiplos formatos via Content-Type.
+//
+// Doc de referência:
+// https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-pronunciation-assessment
 
 export const config = {
   api: {
     bodyParser: {
-      sizeLimit: '10mb', // áudios podem ficar até ~5MB
-    },
-  },
+      sizeLimit: '10mb'
+    }
+  }
 };
 
 export default async function handler(req, res) {
-  // CORS — permite que o HTML do quiz, hospedado em qualquer lugar, fale com este backend
+  // CORS — libera chamadas do HTML do quiz hospedado em qualquer domínio
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // pré-requisição OPTIONS (browser pergunta antes de fazer o POST real)
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -35,101 +39,133 @@ export default async function handler(req, res) {
   }
 
   try {
+    const { audio, mimeType, referenceText } = req.body || {};
+
+    if (!audio || !referenceText) {
+      return res.status(400).json({
+        error: 'Missing required fields: audio (base64) and referenceText'
+      });
+    }
+
     const AZURE_KEY = process.env.AZURE_KEY;
     const AZURE_REGION = process.env.AZURE_REGION;
 
     if (!AZURE_KEY || !AZURE_REGION) {
       return res.status(500).json({
-        error: 'Backend não configurado: faltam AZURE_KEY ou AZURE_REGION',
+        error: 'Server not configured. Missing AZURE_KEY or AZURE_REGION env vars.'
       });
     }
 
-    const { audioBase64, referenceText } = req.body;
+    // Decodifica o áudio base64 pra Buffer
+    const audioBuffer = Buffer.from(audio, 'base64');
 
-    if (!audioBase64 || !referenceText) {
-      return res.status(400).json({
-        error: 'Faltam dados: precisa enviar audioBase64 e referenceText',
-      });
-    }
-
-    // converte base64 → buffer binário (Azure quer áudio binário)
-    const audioBuffer = Buffer.from(audioBase64, 'base64');
-
-    // monta o JSON de configuração da avaliação de pronúncia
-    // ver docs: https://learn.microsoft.com/azure/ai-services/speech-service/how-to-pronunciation-assessment
-    const pronConfig = {
+    // Monta o cabeçalho de Pronunciation Assessment (JSON serializado em base64)
+    const pronunciationConfig = {
       ReferenceText: referenceText,
-      GradingSystem: 'HundredMark',  // score 0-100
-      Granularity: 'Word',           // avaliar palavra por palavra
-      Dimension: 'Comprehensive',    // accuracy + fluency + completeness + pronunciation
-      EnableMiscue: 'True',          // detecta palavras puladas / extras
+      GradingSystem: 'HundredMark',
+      Granularity: 'Word',
+      Dimension: 'Comprehensive',
+      EnableMiscue: false
     };
+    const pronAssessmentHeader = Buffer.from(JSON.stringify(pronunciationConfig)).toString('base64');
 
-    // encode em base64 (jeito que a Azure quer)
-    const pronConfigBase64 = Buffer.from(JSON.stringify(pronConfig)).toString('base64');
+    // Define Content-Type baseado no mimeType recebido
+    let contentType;
+    if (mimeType && mimeType.includes('webm')) {
+      contentType = 'audio/webm; codecs=opus';
+    } else if (mimeType && mimeType.includes('ogg')) {
+      contentType = 'audio/ogg; codecs=opus';
+    } else if (mimeType && mimeType.includes('mp4')) {
+      contentType = 'audio/mp4';
+    } else {
+      contentType = 'audio/webm; codecs=opus'; // default
+    }
 
-    // monta URL da Azure
+    // URL da Azure Speech REST API (short audio + pronunciation assessment)
     const azureUrl = `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed`;
 
-    // chama a Azure
     const azureResponse = await fetch(azureUrl, {
       method: 'POST',
       headers: {
         'Ocp-Apim-Subscription-Key': AZURE_KEY,
-        'Content-Type': 'audio/wav; codecs=audio/pcm; samplerate=16000',
-        'Pronunciation-Assessment': pronConfigBase64,
+        'Content-Type': contentType,
         'Accept': 'application/json',
+        'Pronunciation-Assessment': pronAssessmentHeader
       },
-      body: audioBuffer,
+      body: audioBuffer
     });
 
     if (!azureResponse.ok) {
-      const errorText = await azureResponse.text();
-      console.error('Erro da Azure:', azureResponse.status, errorText);
-      return res.status(500).json({
-        error: `Azure retornou erro ${azureResponse.status}`,
-        detail: errorText,
+      const errText = await azureResponse.text();
+      console.error('Azure error:', azureResponse.status, errText);
+      return res.status(502).json({
+        error: 'Azure Speech API error',
+        status: azureResponse.status,
+        detail: errText
       });
     }
 
     const azureData = await azureResponse.json();
 
-    // a Azure às vezes não reconhece nada
-    if (azureData.RecognitionStatus !== 'Success' || !azureData.NBest || azureData.NBest.length === 0) {
+    // Resposta esperada da Azure:
+    // {
+    //   RecognitionStatus: "Success",
+    //   DisplayText: "the goalkeeper made a brilliant save",
+    //   NBest: [{
+    //     Confidence: 0.9,
+    //     Lexical: "...",
+    //     ITN: "...",
+    //     MaskedITN: "...",
+    //     Display: "...",
+    //     PronunciationAssessment: {
+    //       AccuracyScore: 92.5,
+    //       FluencyScore: 95,
+    //       CompletenessScore: 100,
+    //       PronScore: 94
+    //     },
+    //     Words: [
+    //       { Word: "the", PronunciationAssessment: { AccuracyScore: 90, ErrorType: "None" }, Offset: ..., Duration: ... },
+    //       ...
+    //     ]
+    //   }]
+    // }
+
+    if (azureData.RecognitionStatus !== 'Success') {
       return res.status(200).json({
-        success: false,
-        message: 'Não conseguimos entender o que você falou. Tente de novo, mais alto e claro.',
-        rawAzure: azureData,
+        pronunciationScore: 0,
+        accuracyScore: 0,
+        fluencyScore: 0,
+        completenessScore: 0,
+        words: [],
+        recognitionStatus: azureData.RecognitionStatus,
+        message: azureData.RecognitionStatus === 'NoMatch'
+          ? 'Não consegui entender o que você falou. Tente de novo mais perto do microfone.'
+          : 'Falha no reconhecimento de voz.'
       });
     }
 
-    // pega a primeira hipótese (mais provável)
-    const best = azureData.NBest[0];
-    const pronAssessment = best.PronunciationAssessment || {};
-
-    // extrai score por palavra
+    const best = (azureData.NBest && azureData.NBest[0]) || {};
+    const pa = best.PronunciationAssessment || {};
     const words = (best.Words || []).map(w => ({
       word: w.Word,
-      accuracyScore: Math.round(w.PronunciationAssessment?.AccuracyScore || 0),
-      errorType: w.PronunciationAssessment?.ErrorType || 'None', // None, Mispronunciation, Omission, Insertion
+      accuracyScore: (w.PronunciationAssessment && w.PronunciationAssessment.AccuracyScore) || 0,
+      errorType: (w.PronunciationAssessment && w.PronunciationAssessment.ErrorType) || 'None'
     }));
 
-    // monta a resposta limpa pro frontend
     return res.status(200).json({
-      success: true,
-      transcription: best.Display || best.Lexical || '',
-      overallScore: Math.round(pronAssessment.PronScore || 0),
-      accuracyScore: Math.round(pronAssessment.AccuracyScore || 0),
-      fluencyScore: Math.round(pronAssessment.FluencyScore || 0),
-      completenessScore: Math.round(pronAssessment.CompletenessScore || 0),
-      words: words,
+      pronunciationScore: pa.PronScore || 0,
+      accuracyScore: pa.AccuracyScore || 0,
+      fluencyScore: pa.FluencyScore || 0,
+      completenessScore: pa.CompletenessScore || 0,
+      transcript: best.Display || azureData.DisplayText || '',
+      words: words
     });
 
   } catch (err) {
-    console.error('Erro no backend:', err);
+    console.error('Handler error:', err);
     return res.status(500).json({
-      error: 'Erro interno no servidor',
-      detail: err.message,
+      error: 'Internal server error',
+      detail: err.message
     });
   }
 }

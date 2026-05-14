@@ -67,15 +67,20 @@ export default async function handler(req, res) {
     ).toString('base64');
 
     // ─── Content-Type ───
+    // Azure tem formato específico para cada tipo. Pra WAV PCM 16kHz mono,
+    // o Content-Type EXATO é importante.
     let contentType;
-    if (mimeType && mimeType.includes('webm')) {
+    if (mimeType && mimeType.includes('wav')) {
+      // WAV 16-bit PCM mono 16kHz — formato oficial recomendado pela Azure
+      contentType = 'audio/wav; codecs=audio/pcm; samplerate=16000';
+    } else if (mimeType && mimeType.includes('webm')) {
       contentType = 'audio/webm; codecs=opus';
     } else if (mimeType && mimeType.includes('ogg')) {
       contentType = 'audio/ogg; codecs=opus';
     } else if (mimeType && mimeType.includes('mp4')) {
       contentType = 'audio/mp4';
     } else {
-      contentType = 'audio/webm; codecs=opus';
+      contentType = 'audio/wav; codecs=audio/pcm; samplerate=16000';
     }
 
     const azureUrl = `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed`;

@@ -1,6 +1,6 @@
 // api/pronunciation.js
 //
-// Backend Vercel — Hat Trick Challenge · Gol 02 (v2)
+// Backend Vercel — Hat Trick Challenge · Gol 02 (v3 — FUNCIONAL)
 // Recebe áudio do navegador em base64, envia pra Azure Speech Pronunciation Assessment,
 // e devolve nota de 0-100 + score palavra por palavra.
 //
@@ -8,11 +8,8 @@
 //   AZURE_KEY     → sua chave do Speech Service
 //   AZURE_REGION  → ex: eastus
 //
-// VERSÃO 2 — inclui:
-//   - format=detailed (obrigatório pra Pronunciation Assessment)
-//   - Accept header correto
-//   - Tratamento de variações camelCase/PascalCase na resposta Azure
-//   - Campo _debug na resposta pra ajudar a diagnosticar problemas
+// VERSÃO 3 — corrigida: Azure retorna scores no nível superior do NBest[0]
+// (não dentro de PronunciationAssessment.X). Esta versão lê do lugar certo.
 
 export const config = {
   api: {
@@ -81,13 +78,7 @@ export default async function handler(req, res) {
       contentType = 'audio/webm; codecs=opus';
     }
 
-    // ─── URL da Azure ───
     const azureUrl = `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed`;
-
-    console.log('Calling Azure:', azureUrl);
-    console.log('Content-Type:', contentType);
-    console.log('Audio buffer size:', audioBuffer.length, 'bytes');
-    console.log('Reference text:', referenceText);
 
     const azureResponse = await fetch(azureUrl, {
       method: 'POST',
@@ -111,11 +102,6 @@ export default async function handler(req, res) {
     }
 
     const azureData = await azureResponse.json();
-    console.log('Azure raw response keys:', Object.keys(azureData));
-    if (azureData.NBest && azureData.NBest[0]) {
-      console.log('NBest[0] keys:', Object.keys(azureData.NBest[0]));
-      console.log('NBest[0] full:', JSON.stringify(azureData.NBest[0]).slice(0, 800));
-    }
 
     if (azureData.RecognitionStatus !== 'Success') {
       return res.status(200).json({
@@ -134,34 +120,34 @@ export default async function handler(req, res) {
 
     const best = (azureData.NBest && azureData.NBest[0]) || {};
 
-    // Tenta achar pronunciation assessment em vários formatos possíveis
-    const pa = best.PronunciationAssessment
-            || best.pronunciationAssessment
-            || {};
+    // ─── CORREÇÃO PRINCIPAL ───
+    // A Azure retorna os scores DIRETAMENTE no nível superior do NBest[0]
+    // (não dentro de um objeto PronunciationAssessment aninhado).
+    // Mas pra robustez, tentamos ambos os formatos.
+    const paNested = best.PronunciationAssessment || best.pronunciationAssessment || {};
 
+    const pronScore = best.PronScore || paNested.PronScore || paNested.pronScore || 0;
+    const accuracyScore = best.AccuracyScore || paNested.AccuracyScore || paNested.accuracyScore || 0;
+    const fluencyScore = best.FluencyScore || paNested.FluencyScore || paNested.fluencyScore || 0;
+    const completenessScore = best.CompletenessScore || paNested.CompletenessScore || paNested.completenessScore || 0;
+
+    // Palavras: também tentamos ambos os formatos
     const words = (best.Words || best.words || []).map(w => {
-      const wpa = w.PronunciationAssessment || w.pronunciationAssessment || {};
+      const wpaNested = w.PronunciationAssessment || w.pronunciationAssessment || {};
       return {
         word: w.Word || w.word || '',
-        accuracyScore: wpa.AccuracyScore || wpa.accuracyScore || 0,
-        errorType: wpa.ErrorType || wpa.errorType || 'None'
+        accuracyScore: w.AccuracyScore || wpaNested.AccuracyScore || wpaNested.accuracyScore || 0,
+        errorType: w.ErrorType || wpaNested.ErrorType || wpaNested.errorType || 'None'
       };
     });
 
     return res.status(200).json({
-      pronunciationScore: pa.PronScore || pa.pronScore || 0,
-      accuracyScore: pa.AccuracyScore || pa.accuracyScore || 0,
-      fluencyScore: pa.FluencyScore || pa.fluencyScore || 0,
-      completenessScore: pa.CompletenessScore || pa.completenessScore || 0,
+      pronunciationScore: pronScore,
+      accuracyScore: accuracyScore,
+      fluencyScore: fluencyScore,
+      completenessScore: completenessScore,
       transcript: best.Display || azureData.DisplayText || '',
-      words: words,
-      _debug: {
-        recognitionStatus: azureData.RecognitionStatus,
-        hadPronAssessment: Object.keys(pa).length > 0,
-        nbestKeys: Object.keys(best),
-        firstWordKeys: best.Words && best.Words[0] ? Object.keys(best.Words[0]) : [],
-        paKeys: Object.keys(pa)
-      }
+      words: words
     });
 
   } catch (err) {
